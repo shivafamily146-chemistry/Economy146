@@ -1,0 +1,71 @@
+plugins {
+    id 'java'
+}
+
+group = 'io.github.shivafamily146'
+version = '1.0.0'
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(25)
+    }
+}
+
+repositories {
+    mavenCentral()
+    maven {
+        name = 'papermc'
+        url = 'https://repo.papermc.io/repository/maven-public/'
+    }
+}
+
+dependencies {
+    compileOnly 'io.papermc.paper:paper-api:26.3-pre-2.build.0-alpha'
+    implementation 'org.xerial:sqlite-jdbc:3.50.3.0'
+
+    testImplementation platform('org.junit:junit-bom:5.12.2')
+    testImplementation 'org.junit.jupiter:junit-jupiter'
+    testImplementation 'org.yaml:snakeyaml:2.2'
+    testImplementation 'io.papermc.paper:paper-api:26.3-pre-2.build.0-alpha'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+    options.release = 25
+}
+
+test {
+    useJUnitPlatform()
+}
+
+jar {
+    archiveFileName = 'IndianEconomy.jar'
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+    from {
+        configurations.runtimeClasspath.collect { it.isDirectory() ? it : zipTree(it) }
+    }
+}
+
+tasks.register('sourceZip', Zip) {
+    archiveFileName = 'IndianEconomy-source.zip'
+    destinationDirectory = layout.buildDirectory
+    from('src') {
+        into 'src'
+    }
+    from('gradle/wrapper') {
+        into 'gradle/wrapper'
+    }
+    from(['build.gradle', 'settings.gradle', 'gradlew', 'gradlew.bat', 'README.md', '.gitignore']) {
+        into '.'
+    }
+    from('.github/workflows') {
+        into '.github/workflows'
+    }
+}
+
+processResources {
+    filesMatching('plugin.yml') {
+        expand(version: project.version)
+    }
+}

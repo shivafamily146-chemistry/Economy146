@@ -1,0 +1,35 @@
+# Shop categories and their displayed materials.
+categories:
+  Blocks:
+    - STONE
+    - DIRT
+    - OAK_LOG
+  Weapons:
+    - IRON_SWORD
+    - BOW
+  Armor:
+    - IRON_HELMET
+    - IRON_CHESTPLATE
+  Tools:
+    - IRON_PICKAXE
+    - IRON_AXE
+  Food:
+    - BREAD
+    - COOKED_BEEF
+  Farming:
+    - WHEAT
+    - CARROT
+  Redstone:
+    - REDSTONE
+    - LEVER
+  Ores and Minerals:
+    - COAL_ORE
+    - IRON_INGOT
+    - DIAMOND
+  Decoration:
+    - GLASS
+    - TORCH
+  Special Items:
+    - ENDER_PEARL
+    - GOLDEN_APPLE
+sell-blacklist: []

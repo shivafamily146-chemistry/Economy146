@@ -1,0 +1,79 @@
+name: IndianEconomy
+version: '${version}'
+main: io.github.shivafamily146.indianeconomy.IndianEconomyPlugin
+api-version: '26.3'
+authors: [ShivaFamily146]
+description: Persistent Indian Rupee economy for Paper.
+commands:
+  help:
+    description: Show IndianEconomy player help.
+    permission: indianeconomy.use
+  bal:
+    description: Show your balance or another player's balance.
+    usage: /bal [player]
+    permission: indianeconomy.use
+    aliases: [balance, money]
+  pay:
+    description: Pay another player.
+    usage: /pay <player> <amount>
+    permission: indianeconomy.pay
+  baltop:
+    description: Show the economy leaderboard.
+    permission: indianeconomy.use
+  daily:
+    description: Claim your daily reward.
+    permission: indianeconomy.use
+  shop:
+    description: Open the item shop.
+    permission: indianeconomy.shop
+  buy:
+    description: Buy an item from the shop.
+    usage: /buy <item> <amount>
+    permission: indianeconomy.shop
+  sell:
+    description: Sell items from your inventory.
+    usage: /sell <item> <amount>
+    permission: indianeconomy.sell
+  sellall:
+    description: Sell all eligible items from your inventory.
+    permission: indianeconomy.sell
+  auction:
+    description: Create, browse, and buy auction listings.
+    permission: indianeconomy.use
+  market:
+    description: Create, browse, and buy market listings.
+    permission: indianeconomy.use
+  orders:
+    description: Create and fulfill item orders.
+    permission: indianeconomy.use
+  ie:
+    description: IndianEconomy administration.
+    usage: /ie help
+    permission: indianeconomy.admin
+permissions:
+  indianeconomy.use:
+    default: true
+  indianeconomy.shop:
+    default: true
+  indianeconomy.sell:
+    default: true
+  indianeconomy.pay:
+    default: true
+  indianeconomy.admin:
+    default: op
+  indianeconomy.reload:
+    default: op
+  indianeconomy.give:
+    default: op
+  indianeconomy.take:
+    default: op
+  indianeconomy.set:
+    default: op
+  indianeconomy.shop.manage:
+    default: op
+  indianeconomy.auction.manage:
+    default: op
+  indianeconomy.market.manage:
+    default: op
+  indianeconomy.orders.manage:
+    default: op

@@ -1,0 +1,7 @@
+# All amounts are decimal rupees and are stored precisely to two decimal places.
+starting-balance: 100.00
+daily-reward: 25.00
+daily-cooldown-hours: 24
+transaction-limit: 1000000.00
+database-file: economy.db
+maintenance: false

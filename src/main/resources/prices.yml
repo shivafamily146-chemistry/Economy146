@@ -1,0 +1,68 @@
+# Entries use Material names. A zero price disables that direction.
+prices:
+  STONE:
+    buy: 1.00
+    sell: 0.25
+  DIRT:
+    buy: 0.50
+    sell: 0.10
+  OAK_LOG:
+    buy: 3.00
+    sell: 1.00
+  BREAD:
+    buy: 2.00
+    sell: 0.50
+  IRON_SWORD:
+    buy: 30.00
+    sell: 10.00
+  BOW:
+    buy: 25.00
+    sell: 8.00
+  IRON_HELMET:
+    buy: 24.00
+    sell: 8.00
+  IRON_CHESTPLATE:
+    buy: 40.00
+    sell: 14.00
+  IRON_PICKAXE:
+    buy: 32.00
+    sell: 11.00
+  IRON_AXE:
+    buy: 28.00
+    sell: 9.00
+  COOKED_BEEF:
+    buy: 3.00
+    sell: 0.75
+  WHEAT:
+    buy: 1.50
+    sell: 0.40
+  CARROT:
+    buy: 1.00
+    sell: 0.25
+  REDSTONE:
+    buy: 4.00
+    sell: 1.00
+  LEVER:
+    buy: 2.00
+    sell: 0.50
+  COAL_ORE:
+    buy: 8.00
+    sell: 2.00
+  IRON_INGOT:
+    buy: 6.00
+    sell: 1.50
+  DIAMOND:
+    buy: 100.00
+    sell: 25.00
+  GLASS:
+    buy: 2.00
+    sell: 0.50
+  TORCH:
+    buy: 1.00
+    sell: 0.25
+  ENDER_PEARL:
+    buy: 20.00
+    sell: 5.00
+  GOLDEN_APPLE:
+    buy: 50.00
+    sell: 12.50
