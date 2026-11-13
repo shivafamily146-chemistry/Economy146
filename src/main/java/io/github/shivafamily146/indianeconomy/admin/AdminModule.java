@@ -13,6 +13,8 @@ import org.bukkit.configuration.file.YamlConfiguration;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
+import org.bukkit.event.player.AsyncPlayerChatEvent;
+import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.event.inventory.InventoryClickEvent;
 import org.bukkit.event.inventory.InventoryDragEvent;
 import org.bukkit.inventory.Inventory;
@@ -37,6 +39,7 @@ public final class AdminModule implements Listener {
     private static final long CONFIRMATION_LIFETIME_MILLIS = 60_000;
     private final IndianEconomyPlugin plugin;
     private final Map<UUID, PendingConfirmation> confirmations = new ConcurrentHashMap<>();
+    private final Map<UUID, GuiPrompt> guiPrompts = new ConcurrentHashMap<>();
 
     public AdminModule(IndianEconomyPlugin plugin) {
         this.plugin = plugin;
@@ -101,19 +104,19 @@ public final class AdminModule implements Listener {
             plugin.sendText(player, "&cYou do not have permission.");
             return true;
         }
-        AdminHolder holder = new AdminHolder(player.getUniqueId());
+        AdminHolder holder = new AdminHolder(player.getUniqueId(), null);
         Inventory inventory = holder.getInventory();
-        inventory.setItem(10, button(Material.GOLD_INGOT, "&6Economy Management", "&7Show the balance leaderboard"));
-        inventory.setItem(11, button(Material.PLAYER_HEAD, "&6Player Management", "&7Inspect online accounts"));
-        inventory.setItem(12, button(Material.CHEST, "&6Shop Catalog & Prices", "&7List configured items and prices"));
-        inventory.setItem(13, button(Material.DIAMOND, "&6Auction Listings", "&7Review auction listings"));
-        inventory.setItem(14, button(Material.EMERALD, "&6Market Listings", "&7Review market listings"));
-        inventory.setItem(15, button(Material.WRITABLE_BOOK, "&6Player Orders", "&7Review escrowed player orders"));
-        inventory.setItem(16, button(Material.BOOK, "&6Transaction Logs", "&7Show recent transaction history"));
+        inventory.setItem(10, button(Material.GOLD_INGOT, "&6Economy Management", "&7Balances, credits, debits and resets"));
+        inventory.setItem(11, button(Material.PLAYER_HEAD, "&6Player Management", "&7Inspect, freeze and view histories"));
+        inventory.setItem(12, button(Material.CHEST, "&6Shop Management", "&7Prices, catalog and shop reload"));
+        inventory.setItem(13, button(Material.DIAMOND, "&6Auction Management", "&7Bids, listing review and moderation"));
+        inventory.setItem(14, button(Material.EMERALD, "&6Market Management", "&7Review and remove listings"));
+        inventory.setItem(15, button(Material.WRITABLE_BOOK, "&6Orders Management", "&7Review escrowed player orders"));
+        inventory.setItem(16, button(Material.BOOK, "&6Transaction Logs", "&7Show recent transactions"));
         inventory.setItem(17, button(Material.WRITABLE_BOOK, "&6Admin Audit Logs", "&7Show recent admin commands"));
-        inventory.setItem(21, button(Material.CLOCK, "&6Daily Reward Settings", "&7View current reward and cooldown"));
-        inventory.setItem(23, button(Material.REDSTONE, "&6Server Settings", "&7View maintenance and version"));
-        inventory.setItem(31, button(Material.ENDER_CHEST, "&6Database Management", "&7Create an integrity-checked backup"));
+        inventory.setItem(21, button(Material.CLOCK, "&6Daily Reward Settings", "&7Manage reward and cooldown"));
+        inventory.setItem(23, button(Material.REDSTONE, "&6Server Settings", "&7Reload, save, debug and maintenance"));
+        inventory.setItem(31, button(Material.ENDER_CHEST, "&6Database Management", "&7Backup and restore SQLite data"));
         inventory.setItem(49, button(Material.BARRIER, "&cClose", ""));
         player.openInventory(inventory);
         return true;
@@ -130,30 +133,245 @@ public final class AdminModule implements Listener {
                 || event.getClickedInventory() != event.getView().getTopInventory()) {
             return;
         }
+        if (holder.section != null) {
+            handleSectionClick(player, holder, event.getRawSlot());
+            return;
+        }
         switch (event.getRawSlot()) {
-            case 10 -> plugin.getServer().dispatchCommand(player, "ie baltop");
-            case 11 -> inspectOnline(player);
-            case 12 -> plugin.getServer().dispatchCommand(player, "ie shoplist");
-            case 13 -> showListings(player, MarketplaceService.Kind.AUCTION);
-            case 14 -> showListings(player, MarketplaceService.Kind.MARKET);
-            case 15 -> showListings(player, MarketplaceService.Kind.ORDERS);
-            case 16 -> showTransactions(player, null, false);
+            case 10 -> openSection(player, "economy");
+            case 11 -> openSection(player, "players");
+            case 12 -> openSection(player, "shop");
+            case 13 -> openSection(player, "auction");
+            case 14 -> openSection(player, "market");
+            case 15 -> openSection(player, "orders");
+            case 16 -> openSection(player, "transactions");
             case 17 -> showAdminLogs(player);
-            case 21 -> dailyInfo(player);
-            case 23 -> {
-                player.closeInventory();
-                plugin.sendText(player, "&eMaintenance: " + plugin.getConfig().getBoolean("maintenance")
-                        + " | Version: " + plugin.getPluginMeta().getVersion());
-            }
-            case 31 -> {
-                player.closeInventory();
-                plugin.getServer().dispatchCommand(player, "ie backup");
-            }
+            case 21 -> openSection(player, "daily");
+            case 23 -> openSection(player, "server");
+            case 31 -> openSection(player, "database");
             case 49 -> player.closeInventory();
             default -> {
             }
         }
     }
+
+            @EventHandler
+            public void onGuiPromptChat(AsyncPlayerChatEvent event) {
+                GuiPrompt prompt = guiPrompts.remove(event.getPlayer().getUniqueId());
+                if (prompt == null) {
+                    return;
+                }
+                event.setCancelled(true);
+                String[] parts = event.getMessage().trim().split("\\s+");
+                boolean valid = parts.length == prompt.argumentCount
+                        && java.util.Arrays.stream(parts).allMatch(part -> part.matches("[A-Za-z0-9_.-]+"));
+                Bukkit.getScheduler().runTask(plugin, () -> {
+                    if (!valid) {
+                        plugin.sendText(event.getPlayer(), "&cInvalid input. Reopen the admin section and try again.");
+                        return;
+                    }
+                    plugin.getServer().dispatchCommand(event.getPlayer(),
+                            prompt.command + " " + String.join(" ", parts));
+                });
+            }
+
+            @EventHandler
+            public void onGuiPromptQuit(PlayerQuitEvent event) {
+                guiPrompts.remove(event.getPlayer().getUniqueId());
+            }
+
+            private void openSection(Player player, String section) {
+                List<AdminAction> actions = switch (section) {
+                    case "economy" -> List.of(
+                            commandAction(Material.GOLD_INGOT, "Leaderboard", "ie baltop"),
+                            promptAction(Material.EMERALD, "Give balance", "ie give", 2, "player amount"),
+                            promptAction(Material.REDSTONE, "Take balance", "ie take", 3, "player amount confirm"),
+                            promptAction(Material.DIAMOND, "Set balance", "ie set", 3, "player amount confirm"),
+                            promptAction(Material.BARRIER, "Reset balance", "ie reset", 2, "player confirm"),
+                            promptAction(Material.EMERALD_BLOCK, "Give all", "ie giveall", 2, "amount confirm"),
+                            promptAction(Material.REDSTONE_BLOCK, "Remove all", "ie removeall", 2, "amount confirm"),
+                            commandAction(Material.CLOCK, "Reset all balances", "ie baltop reset")
+                    );
+                    case "players" -> List.of(
+                            commandAction(Material.PLAYER_HEAD, "Online players", "ie inspect"),
+                            promptAction(Material.BOOK, "Inspect player", "ie inspect", 1, "player"),
+                            promptAction(Material.WRITABLE_BOOK, "Transaction history", "ie history", 1, "player"),
+                            promptAction(Material.PAPER, "Payment log", "ie paylog", 1, "player"),
+                            promptAction(Material.ICE, "Freeze account", "ie freeze", 1, "player"),
+                            promptAction(Material.SNOWBALL, "Unfreeze account", "ie unfreeze", 1, "player"),
+                            commandAction(Material.GOLD_INGOT, "All transactions", "ie transactions")
+                    );
+                    case "shop" -> List.of(
+                            commandAction(Material.BOOK, "List prices", "ie shoplist"),
+                            commandAction(Material.CHEST, "Open player shop", "OPEN_SHOP"),
+                            promptAction(Material.CHEST_MINECART, "Add item", "ie additem", 1, "material"),
+                            promptAction(Material.BARRIER, "Remove item", "ie removeitem", 1, "material"),
+                            promptAction(Material.GOLD_INGOT, "Set buy and sell", "ie setprice", 3, "material buy sell"),
+                            promptAction(Material.EMERALD, "Set buy price", "ie setbuy", 2, "material price"),
+                            promptAction(Material.IRON_INGOT, "Set sell price", "ie setsell", 2, "material price"),
+                            commandAction(Material.COMPASS, "Reload shop files", "ie shopreload"),
+                            commandAction(Material.TNT, "Clear shop", "ie shopclear")
+                    );
+                    case "auction" -> List.of(
+                            commandAction(Material.DIAMOND, "List auctions", "ie auction list"),
+                            promptAction(Material.BARRIER, "Remove auction", "ie auction remove", 2, "id confirm"),
+                            commandAction(Material.TNT, "Clear auctions", "ie auction clear")
+                    );
+                    case "market" -> List.of(
+                            commandAction(Material.EMERALD, "List market listings", "ie market list"),
+                            promptAction(Material.BARRIER, "Remove market listing", "ie market remove", 2, "id confirm"),
+                            commandAction(Material.TNT, "Clear market", "ie market clear")
+                    );
+                    case "orders" -> List.of(
+                            commandAction(Material.WRITABLE_BOOK, "List orders", "ie orders list"),
+                            promptAction(Material.BARRIER, "Cancel order", "ie orders cancel", 2, "id confirm"),
+                            commandAction(Material.TNT, "Clear orders", "ie orders clear")
+                    );
+                    case "transactions" -> List.of(
+                            commandAction(Material.BOOK, "Recent transactions", "ie transactions"),
+                            commandAction(Material.WRITABLE_BOOK, "Admin audit log", "SHOW_ADMIN_LOGS")
+                    );
+                    case "daily" -> List.of(
+                            commandAction(Material.CLOCK, "Reward information", "ie daily info"),
+                            promptAction(Material.EMERALD, "Set reward", "ie setdaily", 1, "amount"),
+                            promptAction(Material.REPEATER, "Set cooldown", "ie daily cooldown", 1, "hours"),
+                            promptAction(Material.PLAYER_HEAD, "Reset player", "ie daily reset", 2, "player confirm"),
+                            commandAction(Material.TNT, "Reset all cooldowns", "ie daily resetall")
+                    );
+                    case "server" -> List.of(
+                            commandAction(Material.REPEATER, "Reload configuration", "ie reload"),
+                            commandAction(Material.BOOK, "Version", "ie version"),
+                            commandAction(Material.CHEST, "Save database", "ie save"),
+                            commandAction(Material.COMPASS, "Database diagnostics", "ie debug"),
+                            commandAction(Material.LIME_CONCRETE, "Enable maintenance", "ie maintenance on"),
+                            commandAction(Material.RED_CONCRETE, "Disable maintenance", "ie maintenance off")
+                    );
+                    case "database" -> List.of(
+                            commandAction(Material.ENDER_CHEST, "Create backup", "ie backup"),
+                            commandAction(Material.COMPASS, "Integrity and diagnostics", "ie debug"),
+                            promptAction(Material.CLOCK, "Restore backup", "ie restore", 2, "backup-file.db confirm")
+                    );
+                    default -> List.of();
+                };
+                AdminHolder holder = new AdminHolder(player.getUniqueId(), section);
+                Inventory inventory = holder.getInventory();
+                int[] slots = {10, 11, 12, 13, 14, 15, 16, 19, 20, 21, 22, 23, 24, 25,
+                        28, 29, 30, 31, 32, 33, 34, 37, 38, 39, 40, 41, 42, 43};
+                for (int index = 0; index < actions.size(); index++) {
+                    AdminAction action = actions.get(index);
+                    inventory.setItem(slots[index], button(action.icon, "&e" + action.title,
+                            action.prompt == null ? "&7Click to run" : "&7Click, then type " + action.hint));
+                }
+                inventory.setItem(49, button(Material.ARROW, "&eBack", "&7Return to admin menu"));
+                inventory.setItem(53, button(Material.BARRIER, "&cClose", ""));
+                player.openInventory(inventory);
+            }
+
+            private void handleSectionClick(Player player, AdminHolder holder, int slot) {
+                if (slot == 49) {
+                    openAdmin(player);
+                    return;
+                }
+                if (slot == 53) {
+                    player.closeInventory();
+                    return;
+                }
+                List<AdminAction> actions = sectionActions(holder.section);
+                int[] slots = {10, 11, 12, 13, 14, 15, 16, 19, 20, 21, 22, 23, 24, 25,
+                        28, 29, 30, 31, 32, 33, 34, 37, 38, 39, 40, 41, 42, 43};
+                for (int index = 0; index < actions.size(); index++) {
+                    if (slots[index] != slot) {
+                        continue;
+                    }
+                    AdminAction action = actions.get(index);
+                    if (action.command.equals("OPEN_SHOP")) {
+                        plugin.getShopModule().openCategories(player);
+                    } else if (action.command.equals("SHOW_ADMIN_LOGS")) {
+                        showAdminLogs(player);
+                    } else if (action.prompt != null) {
+                        guiPrompts.put(player.getUniqueId(), action.prompt);
+                        player.closeInventory();
+                        plugin.sendText(player, "&eType " + action.hint + " in chat. Input is private to this operation.");
+                    } else {
+                        player.closeInventory();
+                        plugin.getServer().dispatchCommand(player, action.command);
+                    }
+                    return;
+                }
+            }
+
+            private List<AdminAction> sectionActions(String section) {
+                return switch (section) {
+                    case "economy" -> List.of(
+                            commandAction(Material.GOLD_INGOT, "Leaderboard", "ie baltop"),
+                            promptAction(Material.EMERALD, "Give balance", "ie give", 2, "player amount"),
+                            promptAction(Material.REDSTONE, "Take balance", "ie take", 3, "player amount confirm"),
+                            promptAction(Material.DIAMOND, "Set balance", "ie set", 3, "player amount confirm"),
+                            promptAction(Material.BARRIER, "Reset balance", "ie reset", 2, "player confirm"),
+                            promptAction(Material.EMERALD_BLOCK, "Give all", "ie giveall", 2, "amount confirm"),
+                            promptAction(Material.REDSTONE_BLOCK, "Remove all", "ie removeall", 2, "amount confirm"),
+                            commandAction(Material.CLOCK, "Reset all balances", "ie baltop reset"));
+                    case "players" -> List.of(
+                            commandAction(Material.PLAYER_HEAD, "Online players", "ie inspect"),
+                            promptAction(Material.BOOK, "Inspect player", "ie inspect", 1, "player"),
+                            promptAction(Material.WRITABLE_BOOK, "Transaction history", "ie history", 1, "player"),
+                            promptAction(Material.PAPER, "Payment log", "ie paylog", 1, "player"),
+                            promptAction(Material.ICE, "Freeze account", "ie freeze", 1, "player"),
+                            promptAction(Material.SNOWBALL, "Unfreeze account", "ie unfreeze", 1, "player"),
+                            commandAction(Material.GOLD_INGOT, "All transactions", "ie transactions"));
+                    case "shop" -> List.of(
+                            commandAction(Material.BOOK, "List prices", "ie shoplist"),
+                            commandAction(Material.CHEST, "Open player shop", "OPEN_SHOP"),
+                            promptAction(Material.CHEST_MINECART, "Add item", "ie additem", 1, "material"),
+                            promptAction(Material.BARRIER, "Remove item", "ie removeitem", 1, "material"),
+                            promptAction(Material.GOLD_INGOT, "Set buy and sell", "ie setprice", 3, "material buy sell"),
+                            promptAction(Material.EMERALD, "Set buy price", "ie setbuy", 2, "material price"),
+                            promptAction(Material.IRON_INGOT, "Set sell price", "ie setsell", 2, "material price"),
+                            commandAction(Material.COMPASS, "Reload shop files", "ie shopreload"),
+                            commandAction(Material.TNT, "Clear shop", "ie shopclear"));
+                    case "auction" -> List.of(
+                            commandAction(Material.DIAMOND, "List auctions", "ie auction list"),
+                            promptAction(Material.BARRIER, "Remove auction", "ie auction remove", 2, "id confirm"),
+                            commandAction(Material.TNT, "Clear auctions", "ie auction clear"));
+                    case "market" -> List.of(
+                            commandAction(Material.EMERALD, "List market listings", "ie market list"),
+                            promptAction(Material.BARRIER, "Remove market listing", "ie market remove", 2, "id confirm"),
+                            commandAction(Material.TNT, "Clear market", "ie market clear"));
+                    case "orders" -> List.of(
+                            commandAction(Material.WRITABLE_BOOK, "List orders", "ie orders list"),
+                            promptAction(Material.BARRIER, "Cancel order", "ie orders cancel", 2, "id confirm"),
+                            commandAction(Material.TNT, "Clear orders", "ie orders clear"));
+                    case "transactions" -> List.of(
+                            commandAction(Material.BOOK, "Recent transactions", "ie transactions"),
+                            commandAction(Material.WRITABLE_BOOK, "Admin audit log", "SHOW_ADMIN_LOGS"));
+                    case "daily" -> List.of(
+                            commandAction(Material.CLOCK, "Reward information", "ie daily info"),
+                            promptAction(Material.EMERALD, "Set reward", "ie setdaily", 1, "amount"),
+                            promptAction(Material.REPEATER, "Set cooldown", "ie daily cooldown", 1, "hours"),
+                            promptAction(Material.PLAYER_HEAD, "Reset player", "ie daily reset", 2, "player confirm"),
+                            commandAction(Material.TNT, "Reset all cooldowns", "ie daily resetall"));
+                    case "server" -> List.of(
+                            commandAction(Material.REPEATER, "Reload configuration", "ie reload"),
+                            commandAction(Material.BOOK, "Version", "ie version"),
+                            commandAction(Material.CHEST, "Save database", "ie save"),
+                            commandAction(Material.COMPASS, "Database diagnostics", "ie debug"),
+                            commandAction(Material.LIME_CONCRETE, "Enable maintenance", "ie maintenance on"),
+                            commandAction(Material.RED_CONCRETE, "Disable maintenance", "ie maintenance off"));
+                    case "database" -> List.of(
+                            commandAction(Material.ENDER_CHEST, "Create backup", "ie backup"),
+                            commandAction(Material.COMPASS, "Integrity and diagnostics", "ie debug"),
+                            promptAction(Material.CLOCK, "Restore backup", "ie restore", 2, "backup-file.db confirm"));
+                    default -> List.of();
+                };
+            }
+
+            private AdminAction commandAction(Material icon, String title, String command) {
+                return new AdminAction(icon, title, command, null, null);
+            }
+
+            private AdminAction promptAction(Material icon, String title, String command, int count, String hint) {
+                return new AdminAction(icon, title, command, new GuiPrompt(command, count), hint);
+            }
 
     @EventHandler
     public void onAdminDrag(InventoryDragEvent event) {
@@ -778,7 +996,8 @@ public final class AdminModule implements Listener {
     }
 
     private boolean marketplace(CommandSender sender, String[] args) {
-        MarketplaceService.Kind kind = switch (args[0].toLowerCase()) {
+        String rootName = args[0].toLowerCase(java.util.Locale.ROOT);
+        MarketplaceService.Kind kind = switch (rootName) {
             case "auction" -> MarketplaceService.Kind.AUCTION;
             case "market" -> MarketplaceService.Kind.MARKET;
             default -> MarketplaceService.Kind.ORDERS;
@@ -789,7 +1008,7 @@ public final class AdminModule implements Listener {
         }
         String action = args.length > 1 ? args[1].toLowerCase() : "";
         if (!List.of("remove", "cancel", "clear").contains(action)) {
-            usage(sender, "/ie " + args[0] + " <list | remove/cancel <id> confirm | clear confirm>");
+            usage(sender, "/ie " + rootName + " <list | remove/cancel <id> confirm | clear confirm>");
             return true;
         }
         if (!require(sender, switch (kind) {
@@ -808,7 +1027,7 @@ public final class AdminModule implements Listener {
         }
         long id = parseId(args[2]);
         if (args.length == 3) {
-            String root = args[0];
+            String root = rootName;
             String subcommand = action;
             plugin.getDatabaseExecutor().execute(() -> {
                 try {
@@ -832,7 +1051,7 @@ public final class AdminModule implements Listener {
             return true;
         }
         if (args.length != 4 || !args[3].equalsIgnoreCase("confirm")
-                || !validConfirmation(sender, args[0] + ":" + action + ":" + id)) {
+                || !validConfirmation(sender, rootName + ":" + action + ":" + id)) {
             plugin.sendText(sender, "&cNo matching pending confirmation.");
             return true;
         }
@@ -854,7 +1073,7 @@ public final class AdminModule implements Listener {
 
     private boolean confirmClear(CommandSender sender, MarketplaceService.Kind kind, String[] args) {
         if (args.length == 2) {
-            String root = args[0];
+            String root = args[0].toLowerCase(java.util.Locale.ROOT);
             plugin.getDatabaseExecutor().execute(() -> {
                 try {
                     List<MarketplaceService.Listing> snapshot = plugin.getMarketplace().list(kind, 1000);
@@ -875,7 +1094,7 @@ public final class AdminModule implements Listener {
             return true;
         }
         if (args.length != 3 || !args[2].equalsIgnoreCase("confirm")
-                || !validConfirmation(sender, args[0])) {
+                || !validConfirmation(sender, args[0].toLowerCase(java.util.Locale.ROOT))) {
             plugin.sendText(sender, "&cNo matching pending clear confirmation.");
             return true;
         }
@@ -1074,11 +1293,14 @@ public final class AdminModule implements Listener {
 
     private static final class AdminHolder implements InventoryHolder {
         private final UUID owner;
+        private final String section;
         private final Inventory inventory;
 
-        private AdminHolder(UUID owner) {
+        private AdminHolder(UUID owner, String section) {
             this.owner = owner;
-            this.inventory = Bukkit.createInventory(this, 54, "IndianEconomy Admin");
+            this.section = section;
+            this.inventory = Bukkit.createInventory(this, 54,
+                    section == null ? "IndianEconomy Admin" : "Admin: " + section);
         }
 
         @Override
@@ -1088,5 +1310,11 @@ public final class AdminModule implements Listener {
     }
 
     private record PendingConfirmation(String operation, List<?> values, long expiresAt) {
+    }
+
+    private record GuiPrompt(String command, int argumentCount) {
+    }
+
+    private record AdminAction(Material icon, String title, String command, GuiPrompt prompt, String hint) {
     }
 }

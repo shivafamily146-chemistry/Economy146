@@ -7,6 +7,7 @@ import io.github.shivafamily146.indianeconomy.shop.ShopModule;
 import io.github.shivafamily146.indianeconomy.market.MarketModule;
 import io.github.shivafamily146.indianeconomy.market.MarketplaceService;
 import io.github.shivafamily146.indianeconomy.admin.AdminModule;
+import io.github.shivafamily146.indianeconomy.transactions.InventoryEscrow;
 import io.github.shivafamily146.indianeconomy.utils.Money;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandExecutor;
@@ -47,6 +48,7 @@ public final class IndianEconomyPlugin extends JavaPlugin implements CommandExec
     private MarketplaceService marketplace;
     private MarketModule marketModule;
     private AdminModule adminModule;
+    private InventoryEscrow inventoryEscrow;
     private final Set<UUID> pendingPayments = ConcurrentHashMap.newKeySet();
 
     @Override
@@ -72,6 +74,7 @@ public final class IndianEconomyPlugin extends JavaPlugin implements CommandExec
             economy = new EconomyService(database, Money.toPaise(getConfig().getString("starting-balance", "100.00")));
             shopModule = new ShopModule(this, shopCatalog);
             marketplace = new MarketplaceService(database, economy);
+            inventoryEscrow = new InventoryEscrow(this, marketplace);
             marketModule = new MarketModule(this, marketplace);
             adminModule = new AdminModule(this);
         } catch (SQLException | IOException | IllegalArgumentException exception) {
@@ -89,7 +92,20 @@ public final class IndianEconomyPlugin extends JavaPlugin implements CommandExec
         }
         getServer().getPluginManager().registerEvents(new AccountListener(this), this);
         getServer().getPluginManager().registerEvents(shopModule, this);
+        getServer().getPluginManager().registerEvents(inventoryEscrow, this);
         getServer().getPluginManager().registerEvents(adminModule, this);
+        getServer().getScheduler().runTaskTimer(this, () -> databaseExecutor.execute(() -> {
+            try {
+                int expired = marketplace.expireAuctions(System.currentTimeMillis());
+                if (expired > 0) {
+                    getServer().getScheduler().runTask(this,
+                            () -> getServer().getOnlinePlayers().forEach(shopModule::deliverPending));
+                    getLogger().info("Settled " + expired + " expired auction(s).");
+                }
+            } catch (SQLException exception) {
+                getLogger().severe("Could not settle expired auctions: " + exception.getMessage());
+            }
+        }), 1200L, 1200L);
         getLogger().info("IndianEconomy enabled using SQLite.");
     }
 
@@ -189,7 +205,10 @@ public final class IndianEconomyPlugin extends JavaPlugin implements CommandExec
         if ((name.equals("buy") || name.equals("sell")) && args.length == 2) {
             return matching(List.of("1", "16", "64"), current);
         }
-        if ((name.equals("auction") || name.equals("market")) && args.length == 1) {
+        if (name.equals("auction") && args.length == 1) {
+            return matching(List.of("list", "sell", "bid"), current);
+        }
+        if (name.equals("market") && args.length == 1) {
             return matching(List.of("list", "sell", "buy"), current);
         }
         if ((name.equals("auction") || name.equals("market")) && args.length == 2
@@ -199,6 +218,9 @@ public final class IndianEconomyPlugin extends JavaPlugin implements CommandExec
         if ((name.equals("auction") || name.equals("market")) && args.length == 3
                 && args[0].equalsIgnoreCase("sell")) {
             return matching(List.of("1", "16", "64"), current);
+        }
+        if (name.equals("auction") && args.length == 3 && args[0].equalsIgnoreCase("bid")) {
+            return matching(List.of("1.00", "10.00", "100.00"), current);
         }
         if (name.equals("orders") && args.length == 1) {
             return matching(List.of("list", "create", "fulfill", "cancel"), current);
@@ -420,7 +442,7 @@ public final class IndianEconomyPlugin extends JavaPlugin implements CommandExec
             return;
         }
         if (args[0].equalsIgnoreCase("version")) {
-            sender.sendMessage(color("&eIndianEconomy " + getPluginMeta().getVersion() + " (Paper API 26.3 preview)"));
+            sender.sendMessage(color("&eIndianEconomy " + getPluginMeta().getVersion() + " (Paper API 26.3.build.249-stable)"));
             return;
         }
         if (args[0].equalsIgnoreCase("reload")) {
@@ -672,6 +694,10 @@ public final class IndianEconomyPlugin extends JavaPlugin implements CommandExec
 
     public MarketplaceService getMarketplace() {
         return marketplace;
+    }
+
+    public InventoryEscrow getInventoryEscrow() {
+        return inventoryEscrow;
     }
 
     public Database getDatabase() {

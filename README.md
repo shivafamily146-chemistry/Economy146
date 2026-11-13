@@ -4,10 +4,10 @@ IndianEconomy is a modular Paper plugin for a persistent Rupee economy, configur
 
 ## Compatibility
 
-- Minecraft/Paper target: `26.3-pre-2.build.0-alpha` (a Paper preview API artifact; this is **not** a stable Paper 26.3 release).
+- Minecraft/Paper target: `26.3.build.249-stable` (stable Paper API artifact).
 - Java: 25.
 - Database: SQLite, with the JDBC driver bundled in the plugin JAR.
-- The plugin has not been started on a real Paper server. Use a matching preview server and test on a disposable world/database first.
+- The dependency is the stable Paper API artifact, verified from Paper's Maven repository. The plugin has not been started on a real Paper server.
 
 ## Build and artifacts
 
@@ -43,7 +43,7 @@ GitHub Actions runs the clean build/tests and uploads both files as the `IndianE
 | `/buy <material> <amount>` | Buy directly from the catalog. |
 | `/sell <material> <amount>` | Sell eligible inventory items. |
 | `/sellall` | Sell all eligible items in storage. |
-| `/auction list`, `/auction sell <material> <amount> <total-price>`, `/auction buy <id>` | Create and purchase fixed-price auction listings. |
+| `/auction list`, `/auction sell <material> <amount> <starting-bid>`, `/auction bid <id> <amount>` | Create a 24-hour auction, place escrowed bids, and receive the item after settlement. |
 | `/market list`, `/market sell <material> <amount> <total-price>`, `/market buy <id>` | Create and purchase market listings. |
 | `/orders list`, `/orders create <material> <amount> <total-budget>`, `/orders fulfill <id>`, `/orders cancel <id>` | Create/fill/cancel escrow-funded player orders. |
 
@@ -86,7 +86,7 @@ These require `indianeconomy.shop.manage`. Shop data is configured in `shop.yml`
 - `/ie maintenance on|off`, `/ie reload` (`indianeconomy.reload`), `/ie version`
 - `/ie admin` opens the admin overview GUI.
 
-Admin listings are fixed-price sales; the auction implementation does not include bidding or timed expiry. Admin commands are also recorded in the SQLite audit log and surfaced in the Admin GUI.
+Admin commands are also recorded in the SQLite audit log and surfaced in the Admin GUI. The GUI has economy, player, shop, auction, market, orders, transaction, daily, server, and database sections; each exposes a control, command, or validated chat prompt for its operations.
 
 ## Permissions
 
@@ -115,21 +115,20 @@ Basic permissions do not imply any admin permission.
 - `shop.yml`: categories and sell blacklist.
 - `prices.yml`: per-material buy/sell prices; zero disables that side.
 
-Reload validates candidate configuration before replacing runtime settings. SQLite uses schema versioning, prepared statements, account/transaction indexes, WAL mode, atomic transfers/order escrow, pending delivery records, integrity checks, and `VACUUM INTO` backups. Restore validates the backup and creates a pre-restore safety backup.
+Reload validates candidate configuration before replacing runtime settings. SQLite uses schema versioning, prepared statements, account/transaction indexes, WAL mode, atomic transfers/order escrow, pending delivery records, integrity checks, and `VACUUM INTO` backups. Restore validates the backup and creates a pre-restore safety backup. Player sales, auction/market listing creation, and order fulfillment use a persisted item-operation journal: selected plain items are tagged and saved before the database intent is written; removal is saved before the intent is atomically credited or listed; pending intents are recovered on the owner's next join. Pending item deliveries are also saved with a marker before their database receipt is acknowledged.
 
 ## Verification and known limits
 
-Automated tests cover money parsing, balance/payment behavior, persistence across database reopen, frozen-account payments, daily cooldown and snapshot resets, shop catalog validation, auction/market/order database flows, backup/restore, command declarations, and permission defaults.
+Automated tests cover money parsing, balance/payment behavior, persistence across database reopen, frozen-account payments, daily cooldown and snapshot resets, shop catalog validation, crash-persistent item-operation journals, exactly-once journal completion, escrowed order fulfillment, concurrent market purchases, auction bid validation/outbid refunds/expiry/admin removal, backup/restore, command declarations, and permission defaults.
 
 This is not yet a claim of production readiness:
 
-- No real Paper server, GUI event integration, restart integration, or full command execution/permission integration suite was available/run.
-- Shop GUI interaction and inventory delivery protections compile, but require live Paper testing for inventory event behavior and client/server edge cases.
-- Selling and marketplace listing creation currently cross Bukkit inventory changes and SQLite operations; a process crash in the narrow interval between item removal and database commit can still require manual recovery. Do not use valuable items on a production server until this crash window is eliminated and restart-tested.
-- GUI navigation is an overview/review surface; full admin mutations are available through the command workflows rather than every management operation being exposed as a GUI control.
-- The requested API is a preview artifact, not a released stable Paper 26.3 API.
+- No real Paper server, GUI event integration, process-kill failpoint test, or full command execution/permission integration suite was available/run.
+- The journal avoids acknowledging money/listing changes until item removal is saved and recovers pending intents on login, but actual Paper player-data save durability, death/disconnect edge cases, and repeated server crashes still require live-server testing.
+- Shop GUI interaction and inventory delivery protections compile, but need live Paper testing for inventory event ordering, PDC persistence, and client/server edge cases.
+- Auction bids are fixed-term escrowed bids with an automatic 24-hour expiry; there is no configurable duration, extension rule, or bid history command.
 
-The project is considered build/test validated only when the commands below finish successfully. A successful unit test/build does not establish real-server compatibility:
+The project has passed unit/build validation only. It is not claimed production-ready because live Paper integration, restart/crash fault injection, GUI and command-permission integration tests remain outstanding:
 
 ```sh
 ./gradlew clean test build sourceZip

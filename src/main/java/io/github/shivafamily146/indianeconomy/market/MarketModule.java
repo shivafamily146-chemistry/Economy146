@@ -5,16 +5,11 @@ import io.github.shivafamily146.indianeconomy.economy.EconomyService;
 import io.github.shivafamily146.indianeconomy.utils.Money;
 import org.bukkit.Bukkit;
 import org.bukkit.Material;
-import org.bukkit.World;
 import org.bukkit.command.CommandSender;
 import org.bukkit.entity.Player;
-import org.bukkit.inventory.ItemStack;
-import org.bukkit.inventory.PlayerInventory;
 
 import java.sql.SQLException;
-import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
@@ -43,10 +38,14 @@ public final class MarketModule {
                     showListings(player, kind);
                 } else if (args[0].equalsIgnoreCase("sell") && args.length == 4) {
                     createListing(player, kind, args[1], args[2], args[3]);
-                } else if (args[0].equalsIgnoreCase("buy") && args.length == 2) {
+                } else if (root.equals("auction") && args[0].equalsIgnoreCase("bid") && args.length == 3) {
+                    bidAuction(player, args[1], args[2]);
+                } else if (root.equals("market") && args[0].equalsIgnoreCase("buy") && args.length == 2) {
                     buyListing(player, kind, args[1]);
                 } else {
-                    plugin.sendText(player, "&e/" + root + " [list | sell <item> <amount> <total-price> | buy <id>]");
+                    plugin.sendText(player, root.equals("auction")
+                            ? "&e/auction [list | sell <item> <amount> <starting-bid> | bid <id> <amount>]"
+                            : "&e/market [list | sell <item> <amount> <total-price> | buy <id>]");
                 }
             } else if (args.length == 0 || args[0].equalsIgnoreCase("list")) {
                 showListings(player, MarketplaceService.Kind.ORDERS);
@@ -65,6 +64,32 @@ public final class MarketModule {
         return true;
     }
 
+    private void bidAuction(Player player, String idText, String bidText) {
+        long id = parseId(idText);
+        long amount = Money.toPaise(bidText);
+        if (amount > plugin.getTransactionLimit()) {
+            throw new IllegalArgumentException("Bid exceeds the configured transaction limit.");
+        }
+        if (!acquire(player)) {
+            return;
+        }
+        plugin.getDatabaseExecutor().execute(() -> {
+            try {
+                MarketplaceService.BidResult result = service.bidAuction(id, player.getUniqueId(),
+                        player.getName(), amount);
+                Bukkit.getScheduler().runTask(plugin, () -> {
+                    busy.remove(player.getUniqueId());
+                    plugin.sendText(player, result.accepted()
+                            ? "&a" + result.message() + " Current bid: ₹" + Money.format(result.currentBidPaise()) + "."
+                            : "&c" + result.message());
+                });
+            } catch (SQLException exception) {
+                busy.remove(player.getUniqueId());
+                plugin.reportDatabaseFailure("Could not place bid on auction #" + id, exception);
+            }
+        });
+    }
+
     private void createListing(Player player, MarketplaceService.Kind kind, String materialName,
                                String amountText, String priceText) {
         Material material = parseMaterial(materialName);
@@ -73,38 +98,21 @@ public final class MarketModule {
         if (material == null || amount < 1 || price > plugin.getTransactionLimit()) {
             throw new IllegalArgumentException("Invalid item, quantity, or price.");
         }
-        if (!hasPlainStock(player.getInventory(), material, amount)) {
-            plugin.sendText(player, "&cYou need that many plain, unmodified items to list.");
-            return;
-        }
         if (!acquire(player)) {
             return;
         }
-        List<ItemStack> removed = remove(player.getInventory(), material, amount);
-        World world = player.getWorld();
-        var location = player.getLocation();
-        plugin.getDatabaseExecutor().execute(() -> {
-            try {
-                MarketplaceService.Listing listing = service.createListing(kind, player.getUniqueId(), player.getName(),
-                        material.name(), amount, price);
-                Bukkit.getScheduler().runTask(plugin, () -> {
-                    if (listing == null) {
-                        restore(player, world, location, removed);
-                    }
-                    busy.remove(player.getUniqueId());
-                    plugin.sendText(player, listing == null ? "&cFrozen accounts cannot create listings."
-                            : "&aCreated listing #" + listing.id() + " for "
-                            + amount + " " + material.name() + " at ₹" + Money.format(price) + ".");
-                });
-            } catch (SQLException | RuntimeException exception) {
-                Bukkit.getScheduler().runTask(plugin, () -> {
-                    restore(player, world, location, removed);
-                    busy.remove(player.getUniqueId());
-                    plugin.sendText(player, "&cCould not create listing; your items were returned.");
-                });
-                plugin.reportDatabaseFailure("Could not create " + kind + " listing", exception instanceof SQLException sql ? sql : null);
+        MarketplaceService.Operation operation = kind == MarketplaceService.Kind.AUCTION
+                ? MarketplaceService.Operation.AUCTION : MarketplaceService.Operation.MARKET;
+        boolean started = plugin.getInventoryEscrow().begin(player, operation, material, amount, price, result -> {
+            busy.remove(player.getUniqueId());
+            if (result != null && result.resultId() != null && result.resultId() > 0) {
+                plugin.sendText(player, "&aCreated listing #" + result.resultId() + " for "
+                        + amount + " " + material.name() + " at ₹" + Money.format(price) + ".");
             }
         });
+        if (!started) {
+            busy.remove(player.getUniqueId());
+        }
     }
 
     private void buyListing(Player player, MarketplaceService.Kind kind, String idText) {
@@ -179,40 +187,30 @@ public final class MarketModule {
                     return;
                 }
                 Material material = parseMaterial(order.material());
-                if (material == null || !hasPlainStock(player.getInventory(), material, order.amount())) {
+                if (material == null) {
                     busy.remove(player.getUniqueId());
-                    plugin.sendText(player, "&cYou need that many plain, unmodified items to fulfill the order.");
+                    plugin.sendText(player, "&cThe order contains an invalid item.");
                     return;
                 }
-                List<ItemStack> removed = remove(player.getInventory(), material, order.amount());
-                World world = player.getWorld();
-                var location = player.getLocation();
-                plugin.getDatabaseExecutor().execute(() -> {
-                    try {
-                        MarketplaceService.Order filled = service.fillOrder(id, player.getUniqueId(), player.getName());
-                        Bukkit.getScheduler().runTask(plugin, () -> {
-                            if (filled == null) {
-                                restore(player, world, location, removed);
-                                plugin.sendText(player, "&cCould not fulfill order; your items were returned.");
-                            } else {
-                                Player buyer = Bukkit.getPlayer(filled.buyer());
+                boolean started = plugin.getInventoryEscrow().begin(player,
+                        MarketplaceService.Operation.MARKET, material, order.amount(), order.pricePaise(), id,
+                        result -> {
+                            busy.remove(player.getUniqueId());
+                            if (result != null && result.resultId() != null && result.resultId() == -1L) {
+                                plugin.getShopModule().deliverPending(player);
+                                plugin.sendText(player, "&cOrder could not be fulfilled; your items are being returned.");
+                            } else if (result != null && result.relatedId() != null) {
+                                plugin.sendText(player, "&aFulfilled order #" + id + " for ₹"
+                                        + Money.format(result.pricePaise()) + ".");
+                                Player buyer = Bukkit.getPlayer(order.owner());
                                 if (buyer != null) {
                                     plugin.getShopModule().deliverPending(buyer);
                                 }
-                                plugin.sendText(player, "&aFulfilled order #" + id + " for ₹"
-                                        + Money.format(filled.budgetPaise()) + ".");
                             }
-                            busy.remove(player.getUniqueId());
                         });
-                    } catch (SQLException exception) {
-                        Bukkit.getScheduler().runTask(plugin, () -> {
-                            restore(player, world, location, removed);
-                            busy.remove(player.getUniqueId());
-                            plugin.sendText(player, "&cCould not fulfill order; your items were returned.");
-                        });
-                        plugin.reportDatabaseFailure("Could not fulfill order #" + id, exception);
-                    }
-                });
+                if (!started) {
+                    busy.remove(player.getUniqueId());
+                }
             });
         });
     }
@@ -247,8 +245,13 @@ public final class MarketModule {
                         plugin.sendText(player, "&7No listings.");
                     }
                     for (MarketplaceService.Listing listing : listings) {
+                        String expiry = kind == MarketplaceService.Kind.AUCTION
+                                ? " &7expires in " + Math.max(0,
+                                (listing.createdAt() + 24L * 60 * 60 * 1000 - System.currentTimeMillis())
+                                        / 3_600_000L) + "h"
+                                : "";
                         plugin.sendText(player, "&e#" + listing.id() + " &f" + listing.amount() + "x "
-                                + listing.material() + " &7— &a₹" + Money.format(listing.pricePaise()));
+                                + listing.material() + " &7— &a₹" + Money.format(listing.pricePaise()) + expiry);
                     }
                 });
             } catch (SQLException exception) {
@@ -291,51 +294,4 @@ public final class MarketModule {
         throw new IllegalArgumentException("Listing ID must be a positive whole number.");
     }
 
-    private boolean hasPlainStock(PlayerInventory inventory, Material material, int amount) {
-        int found = 0;
-        for (ItemStack item : inventory.getStorageContents()) {
-            if (item != null && item.getType() == material) {
-                if (item.hasItemMeta() && !item.getItemMeta().equals(new ItemStack(material).getItemMeta())) {
-                    continue;
-                }
-                found = Math.addExact(found, item.getAmount());
-            }
-        }
-        return found >= amount;
-    }
-
-    private List<ItemStack> remove(PlayerInventory inventory, Material material, int amount) {
-        List<ItemStack> removed = new ArrayList<>();
-        int left = amount;
-        ItemStack[] contents = inventory.getStorageContents();
-        for (int slot = 0; slot < contents.length && left > 0; slot++) {
-            ItemStack item = contents[slot];
-            if (item == null || item.getType() != material
-                    || (item.hasItemMeta() && !item.getItemMeta().equals(new ItemStack(material).getItemMeta()))) {
-                continue;
-            }
-            int take = Math.min(left, item.getAmount());
-            ItemStack clone = item.clone();
-            clone.setAmount(take);
-            removed.add(clone);
-            item.setAmount(item.getAmount() - take);
-            if (item.getAmount() == 0) {
-                contents[slot] = null;
-            }
-            left -= take;
-        }
-        if (left != 0) {
-            throw new IllegalStateException("Inventory changed during listing.");
-        }
-        inventory.setStorageContents(contents);
-        return removed;
-    }
-
-    private void restore(Player player, World world, org.bukkit.Location location, List<ItemStack> items) {
-        for (ItemStack item : items) {
-            Map<Integer, ItemStack> leftover = player.isOnline()
-                    ? player.getInventory().addItem(item) : Map.of(0, item);
-            leftover.values().forEach(stack -> world.dropItemNaturally(location, stack));
-        }
-    }
 }

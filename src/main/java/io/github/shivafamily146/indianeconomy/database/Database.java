@@ -11,7 +11,7 @@ import java.sql.SQLException;
 import java.sql.Statement;
 
 public final class Database implements AutoCloseable {
-    private static final int SCHEMA_VERSION = 2;
+    private static final int SCHEMA_VERSION = 4;
     private final Path file;
     private Connection connection;
 
@@ -92,6 +92,21 @@ public final class Database implements AutoCloseable {
                       created_at INTEGER NOT NULL
                     )
                     """);
+            ensureColumn(statement, "auctions", "expires_at", "INTEGER NOT NULL DEFAULT 0");
+            ensureColumn(statement, "auctions", "current_bid_paise", "INTEGER NOT NULL DEFAULT 0");
+            ensureColumn(statement, "auctions", "current_bidder_uuid", "TEXT");
+            statement.execute("UPDATE auctions SET expires_at = created_at + 86400000 WHERE expires_at = 0");
+            statement.execute("CREATE INDEX IF NOT EXISTS auctions_expiry_idx ON auctions(expires_at)");
+            statement.execute("""
+                    CREATE TABLE IF NOT EXISTS auction_bids (
+                      id INTEGER PRIMARY KEY AUTOINCREMENT,
+                      auction_id INTEGER NOT NULL,
+                      bidder_uuid TEXT NOT NULL,
+                      amount_paise INTEGER NOT NULL CHECK(amount_paise > 0),
+                      created_at INTEGER NOT NULL
+                    )
+                    """);
+            statement.execute("CREATE INDEX IF NOT EXISTS auction_bids_auction_idx ON auction_bids(auction_id, created_at DESC)");
             statement.execute("""
                     CREATE TABLE IF NOT EXISTS market_listings (
                       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -138,8 +153,40 @@ public final class Database implements AutoCloseable {
                     )
                     """);
             statement.execute("CREATE INDEX IF NOT EXISTS pending_deliveries_player_idx ON pending_deliveries(player_uuid)");
+            statement.execute("""
+                    CREATE TABLE IF NOT EXISTS item_operations (
+                      id TEXT PRIMARY KEY,
+                      owner_uuid TEXT NOT NULL,
+                      username TEXT NOT NULL,
+                      operation TEXT NOT NULL CHECK(operation IN ('SELL', 'AUCTION', 'MARKET')),
+                      material TEXT NOT NULL,
+                      amount INTEGER NOT NULL CHECK(amount > 0),
+                      price_paise INTEGER NOT NULL CHECK(price_paise > 0),
+                      related_id INTEGER,
+                      created_at INTEGER NOT NULL,
+                      state TEXT NOT NULL CHECK(state IN ('PREPARED', 'COMPLETED')),
+                      result_id INTEGER
+                    )
+                    """);
+            statement.execute("CREATE INDEX IF NOT EXISTS item_operations_owner_idx ON item_operations(owner_uuid, state)");
             statement.execute("DELETE FROM schema_version");
             statement.execute("INSERT INTO schema_version(version) VALUES(" + SCHEMA_VERSION + ")");
+        }
+    }
+
+    private void ensureColumn(Statement statement, String table, String column, String definition)
+            throws SQLException {
+        boolean exists = false;
+        try (var columns = statement.executeQuery("PRAGMA table_info(" + table + ")")) {
+            while (columns.next()) {
+                if (column.equalsIgnoreCase(columns.getString("name"))) {
+                    exists = true;
+                    break;
+                }
+            }
+        }
+        if (!exists) {
+            statement.execute("ALTER TABLE " + table + " ADD COLUMN " + column + " " + definition);
         }
     }
 
@@ -194,8 +241,10 @@ public final class Database implements AutoCloseable {
             statement.execute("PRAGMA wal_checkpoint(TRUNCATE)");
         }
         connection.close();
+        boolean originalMoved = false;
         try {
             move(file, previous);
+            originalMoved = true;
             move(staged, file);
             connection = connect(file);
             migrate();
@@ -204,8 +253,7 @@ public final class Database implements AutoCloseable {
             if (connection != null && !connection.isClosed()) {
                 connection.close();
             }
-            Files.deleteIfExists(file);
-            if (Files.exists(previous)) {
+            if (originalMoved && Files.exists(previous)) {
                 move(previous, file);
             }
             connection = connect(file);

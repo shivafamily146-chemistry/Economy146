@@ -48,6 +48,7 @@ public final class ShopModule implements Listener {
     private final Set<UUID> pendingTransactions = ConcurrentHashMap.newKeySet();
     private final Set<UUID> pendingSearch = ConcurrentHashMap.newKeySet();
     private final Set<UUID> pendingDeliveryPlayers = ConcurrentHashMap.newKeySet();
+    private final Set<String> pendingDeliveryIds = ConcurrentHashMap.newKeySet();
     private final NamespacedKey deliveryKey;
     private volatile ShopCatalog catalog;
 
@@ -320,9 +321,8 @@ public final class ShopModule implements Listener {
         }
     }
 
-    @EventHandler
-    public void onPendingDeliveryDeath(org.bukkit.event.entity.PlayerDeathEvent event) {
-        event.getDrops().removeIf(this::isPendingDelivery);
+    public boolean isPendingDeliveryItem(ItemStack item) {
+        return isPendingDelivery(item);
     }
 
     @EventHandler
@@ -408,6 +408,9 @@ public final class ShopModule implements Listener {
                     if (!deliveries.isEmpty()) {
                         pendingDeliveryPlayers.add(player.getUniqueId());
                     }
+                    clearOrphanDeliveryTags(player, deliveries.stream()
+                            .map(io.github.shivafamily146.indianeconomy.economy.EconomyService.PendingDelivery::id)
+                            .collect(java.util.stream.Collectors.toSet()));
                     deliveries.forEach(delivery -> deliverOne(player, delivery));
                     if (deliveries.isEmpty()) {
                         pendingDeliveryPlayers.remove(player.getUniqueId());
@@ -421,12 +424,13 @@ public final class ShopModule implements Listener {
 
     private void deliverOne(Player player,
                             io.github.shivafamily146.indianeconomy.economy.EconomyService.PendingDelivery delivery) {
-        if (!player.isOnline()) {
+        if (!player.isOnline() || !pendingDeliveryIds.add(delivery.id())) {
             return;
         }
         if (!hasDeliveryTag(player, delivery.id())) {
             Material material = parseMaterial(delivery.material());
             if (material == null || !canHold(player.getInventory(), material, delivery.amount())) {
+                pendingDeliveryIds.remove(delivery.id());
                 plugin.sendText(player, "&eA paid shop purchase is waiting for inventory space.");
                 return;
             }
@@ -444,24 +448,34 @@ public final class ShopModule implements Listener {
             Map<Integer, ItemStack> leftovers = player.getInventory().addItem(items.toArray(ItemStack[]::new));
             if (!leftovers.isEmpty()) {
                 removeTaggedItems(player, delivery.id());
+                pendingDeliveryIds.remove(delivery.id());
                 plugin.sendText(player, "&eA paid shop purchase is waiting for inventory space.");
                 return;
             }
+            player.saveData();
         }
         UUID playerId = player.getUniqueId();
         plugin.getDatabaseExecutor().execute(() -> {
             try {
-                plugin.getEconomy().completeDelivery(delivery.id(), playerId);
+                boolean completed = plugin.getEconomy().completeDelivery(delivery.id(), playerId);
                 Bukkit.getScheduler().runTask(plugin, () -> {
+                    if (!completed) {
+                        pendingDeliveryIds.remove(delivery.id());
+                        deliverPending(player);
+                        return;
+                    }
                     if (player.isOnline()) {
                         removeDeliveryTag(player, delivery.id());
+                        player.saveData();
                         plugin.sendText(player, "&aShop purchase delivered: " + delivery.amount() + " "
                                 + delivery.material().toLowerCase(java.util.Locale.ROOT) + ".");
                     }
                     pendingTransactions.remove(playerId);
                     deliverPending(player);
+                    pendingDeliveryIds.remove(delivery.id());
                 });
             } catch (SQLException exception) {
+                pendingDeliveryIds.remove(delivery.id());
                 plugin.reportDatabaseFailure("Could not finalize shop delivery " + delivery.id(), exception);
             }
         });
@@ -494,6 +508,24 @@ public final class ShopModule implements Listener {
                 && item.getItemMeta().getPersistentDataContainer().has(deliveryKey, PersistentDataType.STRING);
     }
 
+    private void clearOrphanDeliveryTags(Player player, Set<String> validIds) {
+        for (int slot = 0; slot < player.getInventory().getSize(); slot++) {
+            ItemStack item = player.getInventory().getItem(slot);
+            if (!isPendingDelivery(item)) {
+                continue;
+            }
+            String id = item.getItemMeta().getPersistentDataContainer()
+                    .get(deliveryKey, PersistentDataType.STRING);
+            if (validIds.contains(id)) {
+                continue;
+            }
+            ItemMeta meta = item.getItemMeta();
+            meta.getPersistentDataContainer().remove(deliveryKey);
+            item.setItemMeta(meta);
+        }
+        player.saveData();
+    }
+
     private void removeDeliveryTag(Player player, String id) {
         for (int slot = 0; slot < player.getInventory().getSize(); slot++) {
             ItemStack item = player.getInventory().getItem(slot);
@@ -522,10 +554,6 @@ public final class ShopModule implements Listener {
             plugin.sendText(player, "&cThis item cannot be sold.");
             return;
         }
-        if (count(player.getInventory(), material) < amount) {
-            plugin.sendText(player, "&cYou do not have that many items.");
-            return;
-        }
         long total;
         try {
             total = Math.multiplyExact(catalog.price(material).sellPaise(), amount);
@@ -541,14 +569,24 @@ public final class ShopModule implements Listener {
             plugin.sendText(player, "&cWait for your previous shop transaction to finish.");
             return;
         }
-        List<ItemStack> removed = remove(player.getInventory(), material, amount);
-        payForSale(player, total, removed);
+        boolean started = plugin.getInventoryEscrow().begin(player,
+                io.github.shivafamily146.indianeconomy.market.MarketplaceService.Operation.SELL,
+                material, amount, total, operation -> {
+                    pendingTransactions.remove(player.getUniqueId());
+                    if (operation != null && operation.resultId() != null && operation.resultId() == 0L) {
+                        plugin.sendText(player, "&aItems sold for ₹" + Money.format(total) + ".");
+                    }
+                });
+        if (!started) {
+            pendingTransactions.remove(player.getUniqueId());
+        }
     }
 
     private void sellAll(Player player) {
         Map<Material, Integer> counts = new HashMap<>();
         for (ItemStack item : player.getInventory().getStorageContents()) {
-            if (item != null && item.getType() != Material.AIR && catalog.isSellable(item.getType())) {
+            if (item != null && item.getType() != Material.AIR && !item.hasItemMeta()
+                    && catalog.isSellable(item.getType())) {
                 counts.merge(item.getType(), item.getAmount(), Math::addExact);
             }
         }
@@ -573,87 +611,29 @@ public final class ShopModule implements Listener {
             plugin.sendText(player, "&cWait for your previous shop transaction to finish.");
             return;
         }
-        List<ItemStack> removed = new ArrayList<>();
-        for (Map.Entry<Material, Integer> entry : counts.entrySet()) {
-            removed.addAll(remove(player.getInventory(), entry.getKey(), entry.getValue()));
-        }
-        payForSale(player, total, removed);
+        List<Map.Entry<Material, Integer>> entries = counts.entrySet().stream().toList();
+        sellAllNext(player, entries, 0, 0);
     }
 
-    private void payForSale(Player player, long total, List<ItemStack> removed) {
-        UUID playerId = player.getUniqueId();
-        String playerName = player.getName();
-        World world = player.getWorld();
-        var location = player.getLocation();
-        plugin.getDatabaseExecutor().execute(() -> {
-            try {
-                boolean credited = !plugin.getEconomy().isFrozen(playerId)
-                        && plugin.getEconomy().adjust(playerId, playerName, total, "SHOP_SELL");
-                Bukkit.getScheduler().runTask(plugin, () -> {
-                    if (credited) {
-                        pendingTransactions.remove(playerId);
-                        plugin.sendText(player, "&aItems sold for ₹" + Money.format(total) + ".");
-                    } else {
-                        restore(player, world, location, removed);
-                        pendingTransactions.remove(playerId);
-                        plugin.sendText(player, "&cSale could not be credited; your items were returned.");
-                    }
+    private void sellAllNext(Player player, List<Map.Entry<Material, Integer>> entries, int index, long totalPaid) {
+        if (!player.isOnline() || index >= entries.size()) {
+            pendingTransactions.remove(player.getUniqueId());
+            if (player.isOnline() && totalPaid > 0) {
+                plugin.sendText(player, "&aEligible items sold for ₹" + Money.format(totalPaid) + ".");
+            }
+            return;
+        }
+        Map.Entry<Material, Integer> entry = entries.get(index);
+        long price = Math.multiplyExact(catalog.price(entry.getKey()).sellPaise(), entry.getValue());
+        boolean started = plugin.getInventoryEscrow().begin(player,
+                io.github.shivafamily146.indianeconomy.market.MarketplaceService.Operation.SELL,
+                entry.getKey(), entry.getValue(), price, operation -> {
+                    long paid = operation != null && operation.resultId() != null && operation.resultId() == 0L
+                            ? price : 0;
+                    sellAllNext(player, entries, index + 1, Math.addExact(totalPaid, paid));
                 });
-            } catch (SQLException exception) {
-                Bukkit.getScheduler().runTask(plugin, () -> {
-                    restore(player, world, location, removed);
-                    pendingTransactions.remove(playerId);
-                    plugin.sendText(player, "&cSale failed; your items were returned.");
-                });
-                plugin.reportDatabaseFailure("Shop sale failed", exception);
-            }
-        });
-    }
-
-    private List<ItemStack> remove(PlayerInventory inventory, Material material, int amount) {
-        List<ItemStack> removed = new ArrayList<>();
-        int left = amount;
-        ItemStack[] contents = inventory.getStorageContents();
-        for (int slot = 0; slot < contents.length && left > 0; slot++) {
-            ItemStack stack = contents[slot];
-            if (stack == null || stack.getType() != material) {
-                continue;
-            }
-            int take = Math.min(left, stack.getAmount());
-            ItemStack removedStack = stack.clone();
-            removedStack.setAmount(take);
-            removed.add(removedStack);
-            stack.setAmount(stack.getAmount() - take);
-            if (stack.getAmount() == 0) {
-                contents[slot] = null;
-            }
-            left -= take;
-        }
-        inventory.setStorageContents(contents);
-        if (left != 0) {
-            throw new IllegalStateException("Inventory changed during item removal.");
-        }
-        return removed;
-    }
-
-    private int count(PlayerInventory inventory, Material material) {
-        int count = 0;
-        for (ItemStack stack : inventory.getStorageContents()) {
-            if (stack != null && stack.getType() == material) {
-                count = Math.addExact(count, stack.getAmount());
-            }
-        }
-        return count;
-    }
-
-    private void restore(Player player, World world, org.bukkit.Location location, List<ItemStack> removed) {
-        if (player.isOnline()) {
-            for (ItemStack item : removed) {
-                Map<Integer, ItemStack> leftover = player.getInventory().addItem(item);
-                leftover.values().forEach(stack -> world.dropItemNaturally(location, stack));
-            }
-        } else {
-            removed.forEach(stack -> world.dropItemNaturally(location, stack));
+        if (!started) {
+            sellAllNext(player, entries, index + 1, totalPaid);
         }
     }
 
